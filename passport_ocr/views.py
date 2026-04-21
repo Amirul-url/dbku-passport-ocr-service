@@ -1,348 +1,740 @@
 import os
 import re
+import threading
 import uuid
 
 from django.conf import settings
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
-from PIL import Image
-import pytesseract
+os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 
-try:
-    import cv2
-    import numpy as np
-except Exception:
-    cv2 = None
-    np = None
+import cv2
+import numpy as np
+import pytesseract
+from PIL import Image
+from paddleocr import PaddleOCR
+
+
+if os.name == "nt":
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+
+PADDLE_OCR = PaddleOCR(
+    use_doc_orientation_classify=False,
+    use_doc_unwarping=False,
+    use_textline_orientation=False,
+    lang="en",
+)
+PADDLE_OCR_LOCK = threading.Lock()
 
 
 COUNTRY_CODE_MAP = {
-    "MYS": "Malaysian",
-    "JPN": "Japanese",
-    "IDN": "Indonesian",
-    "SGP": "Singaporean",
-    "THA": "Thai",
-    "BRN": "Bruneian",
-    "PHL": "Filipino",
-    "VNM": "Vietnamese",
-    "CHN": "Chinese",
-    "KOR": "South Korean",
-    "PRK": "North Korean",
-    "IND": "Indian",
-    "PAK": "Pakistani",
-    "BGD": "Bangladeshi",
-    "LKA": "Sri Lankan",
-    "NPL": "Nepalese",
+    "MYS": "Malaysia",
+    "JPN": "Japan",
+    "IDN": "Indonesia",
+    "SGP": "Singapore",
+    "THA": "Thailand",
+    "BRN": "Brunei",
+    "PHL": "Philippines",
+    "VNM": "Vietnam",
+    "CHN": "China",
+    "KOR": "South Korea",
+    "PRK": "North Korea",
+    "IND": "India",
+    "PAK": "Pakistan",
+    "BGD": "Bangladesh",
+    "LKA": "Sri Lanka",
+    "NPL": "Nepal",
     "MMR": "Myanmar",
-    "KHM": "Cambodian",
-    "LAO": "Lao",
-    "USA": "American",
-    "CAN": "Canadian",
-    "GBR": "British",
-    "AUS": "Australian",
-    "NZL": "New Zealander",
-    "DEU": "German",
-    "FRA": "French",
-    "ITA": "Italian",
-    "ESP": "Spanish",
-    "PRT": "Portuguese",
-    "NLD": "Dutch",
-    "BEL": "Belgian",
-    "CHE": "Swiss",
-    "AUT": "Austrian",
-    "SWE": "Swedish",
-    "NOR": "Norwegian",
-    "DNK": "Danish",
-    "FIN": "Finnish",
-    "IRL": "Irish",
-    "POL": "Polish",
-    "CZE": "Czech",
-    "TUR": "Turkish",
-    "SAU": "Saudi",
-    "ARE": "Emirati",
-    "QAT": "Qatari",
-    "KWT": "Kuwaiti",
-    "OMN": "Omani",
-    "BHR": "Bahraini",
-    "EGY": "Egyptian",
-    "ZAF": "South African",
-    "BRA": "Brazilian",
-    "MEX": "Mexican",
-    "RUS": "Russian",
+    "KHM": "Cambodia",
+    "LAO": "Laos",
+    "USA": "United States",
+    "CAN": "Canada",
+    "GBR": "United Kingdom",
+    "AUS": "Australia",
+    "NZL": "New Zealand",
+    "DEU": "Germany",
+    "FRA": "France",
+    "ITA": "Italy",
+    "ESP": "Spain",
+    "PRT": "Portugal",
+    "NLD": "Netherlands",
+    "BEL": "Belgium",
+    "CHE": "Switzerland",
+    "AUT": "Austria",
+    "SWE": "Sweden",
+    "NOR": "Norway",
+    "DNK": "Denmark",
+    "FIN": "Finland",
+    "IRL": "Ireland",
+    "POL": "Poland",
+    "CZE": "Czech Republic",
+    "TUR": "Turkey",
+    "SAU": "Saudi Arabia",
+    "ARE": "United Arab Emirates",
+    "QAT": "Qatar",
+    "KWT": "Kuwait",
+    "OMN": "Oman",
+    "BHR": "Bahrain",
+    "EGY": "Egypt",
+    "ZAF": "South Africa",
+    "BRA": "Brazil",
+    "MEX": "Mexico",
+    "RUS": "Russia",
+}
+
+GENERIC_PASSPORT_PATTERN = r"^[A-Z0-9]{6,12}$"
+
+COUNTRY_PASSPORT_PATTERNS = {
+    "JPN": r"^[A-Z]{2}\d{7}$",
+    "KOR": r"^[A-Z]{1}[A-Z0-9]{8}$",
+    "USA": r"^\d{9}$",
+    "GBR": r"^\d{9}$",
+    "IND": r"^[A-Z]{1}\d{7}$",
+    "IDN": r"^[A-Z]{1,2}\d{6,8}$",
+    "MYS": r"^[A-Z]{1}\d{8}$",
+    "CHN": r"^[A-Z0-9]{8,9}$",
+    "SGP": r"^[A-Z]\d{7}[A-Z]?$",
+    "THA": r"^[A-Z]{1,2}\d{6,7}$",
 }
 
 
 def ensure_media_dirs():
-    os.makedirs(settings.MEDIA_ROOT / "passport_images", exist_ok=True)
-    os.makedirs(settings.MEDIA_ROOT / "passport_processed", exist_ok=True)
+    os.makedirs(os.path.join(settings.MEDIA_ROOT, "passport_images"), exist_ok=True)
+    os.makedirs(os.path.join(settings.MEDIA_ROOT, "passport_processed"), exist_ok=True)
 
 
-def save_uploaded_image(uploaded_file):
-    ensure_media_dirs()
-    ext = os.path.splitext(uploaded_file.name)[1].lower() or ".jpg"
-    filename = f"{uuid.uuid4().hex}{ext}"
-    full_path = settings.MEDIA_ROOT / "passport_images" / filename
-
-    with open(full_path, "wb+") as destination:
-        for chunk in uploaded_file.chunks():
-            destination.write(chunk)
-
-    return filename, full_path
+def country_code_to_name(code):
+    code = (code or "").strip().upper()
+    return COUNTRY_CODE_MAP.get(code, code if code else "Unknown")
 
 
-def preprocess_image(input_path):
-    if cv2 is None or np is None:
-        return None, None
+def validate_passport_number_by_country(passport_number, country_code_or_name):
+    passport_number = re.sub(r"[^A-Z0-9]", "", (passport_number or "").upper())
+    country_value = (country_code_or_name or "").strip()
 
-    image = cv2.imread(str(input_path))
-    if image is None:
-        return None, None
+    if not passport_number:
+        return False, "Passport number cannot be empty"
 
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    if not re.match(GENERIC_PASSPORT_PATTERN, passport_number):
+        return False, "Passport number format is invalid"
 
-    processed_filename = f"processed_{uuid.uuid4().hex}.jpg"
-    processed_path = settings.MEDIA_ROOT / "passport_processed" / processed_filename
-    cv2.imwrite(str(processed_path), gray)
+    country_code = ""
+    upper_value = country_value.upper()
 
-    return processed_filename, processed_path
+    if upper_value in COUNTRY_CODE_MAP:
+        country_code = upper_value
+    else:
+        reverse_map = {v.upper(): k for k, v in COUNTRY_CODE_MAP.items()}
+        country_code = reverse_map.get(upper_value, "")
+
+    pattern = COUNTRY_PASSPORT_PATTERNS.get(country_code)
+    if pattern and not re.match(pattern, passport_number):
+        country_label = COUNTRY_CODE_MAP.get(country_code, country_code)
+        return False, f"Invalid passport format for {country_label}"
+
+    return True, ""
 
 
-def run_basic_ocr(image_path):
-    try:
-        text = pytesseract.image_to_string(Image.open(image_path))
-        return text.strip()
-    except Exception:
-        return ""
-
-
-def normalize_mrz_text(text):
+def fix_common_ocr_errors(text, mode="general"):
     if not text:
         return ""
 
-    text = text.upper()
-    text = text.replace("«", "<").replace("‹", "<").replace("〈", "<")
-    text = text.replace(" ", "")
-    text = text.replace("|", "I")
-    text = re.sub(r"[^A-Z0-9<\n]", "", text)
+    text = text.strip().upper()
+
+    if mode == "mrz":
+        text = text.replace(" ", "")
+        text = text.replace("«", "<").replace("‹", "<").replace("〈", "<")
+        text = text.replace("|", "I")
+        text = re.sub(r"[^A-Z0-9<]", "", text)
+
+        text = text.replace("KKKK", "<<<<")
+        text = text.replace("KKK", "<<<")
+        text = text.replace("KK", "<<")
+
+        text = text.replace("5PN", "JPN")
+        text = text.replace("2PN", "JPN")
+        text = text.replace("7PN", "JPN")
+        text = text.replace("25PN", "JPN")
+        text = text.replace("MYS:", "MYS")
+        text = text.replace("MYSMA", "MYSMA")
+        text = text.replace("P<MYSMA", "P<MYSMA")
+        text = text.replace("P<JPNNA", "P<JPNNA")
+        text = text.replace("O<", "0<")
+        text = text.replace("<K<", "<<")
+        return text
+
+    if mode == "passport":
+        text = re.sub(r"[^A-Z0-9]", "", text)
+        if not text:
+            return ""
+
+        text = (
+            text.replace("O", "0")
+            .replace("Q", "0")
+            .replace("I", "1")
+            .replace("L", "1")
+            .replace("S", "5")
+            .replace("B", "8")
+        )
+        return text
+
+    if mode == "name":
+        text = text.replace("0", "O")
+        text = text.replace("1", "I")
+        text = text.replace("5", "S")
+        text = re.sub(r"[^A-Z< ]", "", text)
+        return text
+
     return text
 
 
-def find_mrz_lines(raw_text):
-    if not raw_text:
-        return []
+def normalize_display_date(value):
+    if not value:
+        return ""
 
-    normalized = normalize_mrz_text(raw_text)
-    lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+    value = str(value).strip()
+    if not value:
+        return ""
 
-    mrz_lines = []
-    for line in lines:
-        if len(line) >= 25 and "<" in line:
-            mrz_lines.append(line)
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", value)
+    if m:
+        return f"{m.group(3)}/{m.group(2)}/{m.group(1)}"
 
-    return mrz_lines
+    m = re.match(r"^(\d{2})-(\d{2})-(\d{4})$", value)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}/{m.group(3)}"
+
+    m = re.match(r"^(\d{2})/(\d{2})/(\d{4})$", value)
+    if m:
+        first = int(m.group(1))
+        second = int(m.group(2))
+        if first <= 12 and second <= 31:
+            return f"{m.group(2)}/{m.group(1)}/{m.group(3)}"
+
+    return value.replace("-", "/")
 
 
-def clean_name_piece(value):
+def is_reasonable_name(value):
+    if not value:
+        return False
+
+    value = str(value).strip()
+    if len(value) < 2:
+        return False
+
+    if re.search(r"\d", value):
+        return False
+
+    banned = [
+        "passport",
+        "nationality",
+        "country",
+        "date",
+        "issue",
+        "expiry",
+        "birth",
+        "sex",
+        "male",
+        "female",
+        "identity",
+    ]
+    lower_value = value.lower()
+    if any(word in lower_value for word in banned):
+        return False
+
+    cleaned = re.sub(r"[^A-Za-z\s'/-]", "", value).strip()
+    return len(cleaned) >= 2
+
+
+def clean_person_name(value):
     if not value:
         return ""
 
     value = value.replace("<", " ")
+    value = re.sub(r"[^A-Za-z\s'/-]", " ", value)
     value = re.sub(r"\s+", " ", value).strip()
-    return value.title()
 
-
-def split_name_from_mrz(surname_part, given_part):
-    surname = clean_name_piece(surname_part)
-    given = clean_name_piece(given_part)
-
-    return {
-        "first_name": given,
-        "last_name": surname,
-        "full_name": " ".join(part for part in [given, surname] if part).strip(),
-    }
-
-
-def yyMMdd_to_iso(value):
-    if not value or len(value) != 6 or not value.isdigit():
+    if not is_reasonable_name(value):
         return ""
 
-    yy = int(value[0:2])
-    mm = value[2:4]
-    dd = value[4:6]
-
-    # simple passport-style year handling
-    # birth year: assume 1900s for larger yy, 2000s for smaller yy
-    # expiry year: caller can override if needed, but this is good enough for UI
-    year = 1900 + yy if yy >= 30 else 2000 + yy
-
-    return f"{year:04d}-{mm}-{dd}"
+    return value
 
 
-def parse_two_line_mrz(raw_text):
-    mrz_lines = find_mrz_lines(raw_text)
-    if len(mrz_lines) < 2:
-        return {}
+def rescue_mrz_lines(text):
+    if not text:
+        return []
 
-    line1 = mrz_lines[0]
-    line2 = mrz_lines[1]
+    raw_lines = [x.strip().upper() for x in text.splitlines() if x.strip()]
+    rescued = []
 
-    result = {
-        "type": "P",
-        "country_code": "",
-        "nationality": "",
-        "passport_number": "",
-        "first_name": "",
-        "last_name": "",
-        "full_name": "",
-        "date_of_birth": "",
-        "date_of_issue": "",
-        "date_of_expiry": "",
-        "sex": "",
-        "gender": "",
+    for line in raw_lines:
+        line = fix_common_ocr_errors(line, mode="mrz")
+        line = re.sub(r"[^A-Z0-9<]", "", line)
+        if len(line) >= 25 and "<" in line:
+            rescued.append(line)
+
+    return rescued
+
+
+def mrz_char_value(c):
+    if c.isdigit():
+        return int(c)
+    if "A" <= c <= "Z":
+        return ord(c) - 55
+    if c == "<":
+        return 0
+    return 0
+
+
+def mrz_check_digit(data):
+    weights = [7, 3, 1]
+    total = 0
+    for i, char in enumerate(data):
+        total += mrz_char_value(char) * weights[i % 3]
+    return str(total % 10)
+
+
+def split_passport_name_parts(country_code, surname_part, given_part):
+    surname = clean_person_name(fix_common_ocr_errors(surname_part, mode="name"))
+    given = clean_person_name(fix_common_ocr_errors(given_part, mode="name"))
+
+    if not given and surname:
+        parts = surname.split()
+        if len(parts) > 1:
+            surname = parts[0]
+            given = " ".join(parts[1:])
+
+    full_name = " ".join(x for x in [given, surname] if x).strip()
+
+    return {
+        "surname": surname.strip(),
+        "given_name": given.strip(),
+        "full_name": full_name,
     }
 
-    try:
-        if line1.startswith("P<") and len(line1) >= 5:
-            result["type"] = "P"
-            result["country_code"] = line1[2:5]
 
-            nationality = COUNTRY_CODE_MAP.get(result["country_code"], "")
-            result["nationality"] = nationality
+def resolve_passport_name_parts(extracted):
+    first_name = (extracted.get("first_name") or extracted.get("given_name") or "").strip()
+    last_name = (extracted.get("last_name") or extracted.get("surname") or "").strip()
+    full_name = (extracted.get("full_name") or "").strip()
 
-            name_block = line1[5:]
-            if "<<" in name_block:
-                surname_part, given_part = name_block.split("<<", 1)
-                name_parts = split_name_from_mrz(surname_part, given_part)
-                result.update(name_parts)
+    if not first_name and not last_name and full_name:
+        parts = full_name.split()
+        if len(parts) == 1:
+            first_name = parts[0]
+            last_name = ""
+        else:
+            first_name = " ".join(parts[:-1]).strip()
+            last_name = parts[-1].strip()
 
-        if len(line2) >= 27:
-            passport_number = re.sub(r"[^A-Z0-9]", "", line2[0:9]).replace("<", "")
-            nationality_code = re.sub(r"[^A-Z]", "", line2[10:13])
+    if not full_name:
+        full_name = " ".join(x for x in [first_name, last_name] if x).strip()
 
-            birth_raw = re.sub(r"[^0-9]", "", line2[13:19])
-            sex_raw = line2[20:21].upper() if len(line2) > 20 else ""
-            expiry_raw = re.sub(r"[^0-9]", "", line2[21:27])
-
-            if passport_number:
-                result["passport_number"] = passport_number
-
-            if nationality_code and not result["country_code"]:
-                result["country_code"] = nationality_code
-
-            if nationality_code and not result["nationality"]:
-                result["nationality"] = COUNTRY_CODE_MAP.get(nationality_code, "")
-
-            if birth_raw:
-                result["date_of_birth"] = yyMMdd_to_iso(birth_raw)
-
-            if expiry_raw:
-                result["date_of_expiry"] = yyMMdd_to_iso(expiry_raw)
-
-            if sex_raw in ["M", "F", "X"]:
-                result["sex"] = sex_raw
-                result["gender"] = sex_raw
-
-    except Exception:
-        return result
-
-    return result
-
-
-def extract_visual_fallback(raw_text):
-    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
-    result = {
-        "type": "P",
-        "country_code": "",
-        "nationality": "",
-        "passport_number": "",
-        "first_name": "",
-        "last_name": "",
-        "full_name": "",
-        "date_of_birth": "",
-        "date_of_issue": "",
-        "date_of_expiry": "",
-        "sex": "",
-        "gender": "",
+    return {
+        "first_name": first_name,
+        "last_name": last_name,
+        "full_name": full_name,
     }
 
-    upper_lines = [line.upper() for line in lines]
-    full_upper = "\n".join(upper_lines)
 
-    passport_match = re.search(r"\b[A-Z]{1,2}\d{6,8}\b", full_upper)
-    if passport_match:
-        result["passport_number"] = passport_match.group(0)
-
-    for code in COUNTRY_CODE_MAP.keys():
-        if f" {code} " in f" {full_upper} ":
-            result["country_code"] = code
-            result["nationality"] = COUNTRY_CODE_MAP.get(code, "")
-            break
-
-    for i, line in enumerate(upper_lines):
-        next_line = lines[i + 1].strip() if i + 1 < len(lines) else ""
-
-        if ("NATIONALITY" in line or "COUNTRY CODE" in line) and next_line and not result["nationality"]:
-            upper_next = next_line.upper().strip()
-            if upper_next in COUNTRY_CODE_MAP:
-                result["country_code"] = upper_next
-                result["nationality"] = COUNTRY_CODE_MAP.get(upper_next, "")
-            else:
-                result["nationality"] = next_line.title()
-
-        if ("SEX" in line or "GENDER" in line) and next_line and not result["sex"]:
-            sex_val = next_line.strip().upper()[:1]
-            if sex_val in ["M", "F", "X"]:
-                result["sex"] = sex_val
-                result["gender"] = sex_val
-
-        if ("DATE OF BIRTH" in line or "BIRTH" in line) and next_line and not result["date_of_birth"]:
-            result["date_of_birth"] = next_line
-
-        if ("DATE OF ISSUE" in line or "ISSUE" in line) and next_line and not result["date_of_issue"]:
-            result["date_of_issue"] = next_line
-
-        if ("DATE OF EXPIRY" in line or "EXPIRY" in line or "EXPIRE" in line) and next_line and not result["date_of_expiry"]:
-            result["date_of_expiry"] = next_line
-
-        if ("SURNAME" in line or "LAST NAME" in line) and next_line and not result["last_name"]:
-            result["last_name"] = next_line.title()
-
-        if ("GIVEN NAME" in line or "FIRST NAME" in line) and next_line and not result["first_name"]:
-            result["first_name"] = next_line.title()
-
-    result["full_name"] = " ".join(
-        part for part in [result["first_name"], result["last_name"]] if part
+def get_safe_raw_text(extracted):
+    return (
+        extracted.get("raw_text")
+        or extracted.get("ocr_raw_text")
+        or extracted.get("mrz_text")
+        or ""
     ).strip()
 
-    return result
+
+def repair_mrz_line2(line2):
+    if not line2:
+        return ""
+
+    line2 = fix_common_ocr_errors(line2, mode="mrz")
+    line2 = line2.replace("5PN", "JPN")
+    line2 = line2.replace("7PN", "JPN")
+    line2 = line2.replace("25PN", "JPN")
+    line2 = line2.replace("MYS", "MYS")
+
+    first9 = line2[:9]
+    rest = line2[9:]
+
+    first9 = re.sub(r"[^A-Z0-9<]", "", first9)
+    first9 = first9.replace("O", "0").replace("Q", "0")
+    first9 = first9.replace("I", "1").replace("L", "1")
+
+    return first9 + rest
 
 
-def merge_extraction(raw_text):
-    mrz = parse_two_line_mrz(raw_text)
-    visual = extract_visual_fallback(raw_text)
+def parse_two_line_passport_mrz(line1, line2, rescue_mode=False):
+    try:
+        line1 = fix_common_ocr_errors(line1, mode="mrz")
+        line2 = repair_mrz_line2(line2)
 
-    result = {
-        "type": mrz.get("type") or visual.get("type") or "P",
-        "country_code": mrz.get("country_code") or visual.get("country_code") or "",
-        "nationality": mrz.get("nationality") or visual.get("nationality") or "",
-        "passport_number": mrz.get("passport_number") or visual.get("passport_number") or "",
-        "first_name": mrz.get("first_name") or visual.get("first_name") or "",
-        "last_name": mrz.get("last_name") or visual.get("last_name") or "",
-        "full_name": mrz.get("full_name") or visual.get("full_name") or "",
-        "date_of_birth": mrz.get("date_of_birth") or visual.get("date_of_birth") or "",
-        "date_of_issue": mrz.get("date_of_issue") or visual.get("date_of_issue") or "",
-        "date_of_expiry": mrz.get("date_of_expiry") or visual.get("date_of_expiry") or "",
-        "sex": mrz.get("sex") or visual.get("sex") or "",
-        "gender": mrz.get("gender") or visual.get("gender") or "",
+        line1 = re.sub(r"[^A-Z0-9<]", "", line1)
+        line2 = re.sub(r"[^A-Z0-9<]", "", line2)
+
+        line1 = line1[:44].ljust(44, "<")
+        line2 = line2[:44].ljust(44, "<")
+
+        if not line1.startswith("P<"):
+            return None
+
+        issuing_country = line1[2:5]
+        names_part = line1[5:]
+
+        if "<<" in names_part:
+            surname_part, given_part = names_part.split("<<", 1)
+        else:
+            repaired_names = names_part.replace("<K<", "<<")
+            if "<<" not in repaired_names and "<" in repaired_names:
+                repaired_names = repaired_names.replace("<", "<<", 1)
+
+            if "<<" in repaired_names:
+                surname_part, given_part = repaired_names.split("<<", 1)
+            else:
+                surname_part = repaired_names
+                given_part = ""
+
+        name_parts = split_passport_name_parts(
+            country_code=issuing_country,
+            surname_part=surname_part,
+            given_part=given_part,
+        )
+
+        passport_raw = line2[0:9]
+        passport_check = line2[9]
+        nationality = line2[10:13]
+        dob_raw = line2[13:19]
+        dob_check = line2[19]
+        gender_char = line2[20]
+        expiry_raw = line2[21:27]
+        expiry_check = line2[27]
+
+        passport_number = fix_common_ocr_errors(
+            passport_raw.replace("<", ""),
+            mode="passport",
+        )
+
+        passport_valid = mrz_check_digit(passport_raw) == passport_check
+        dob_valid = mrz_check_digit(dob_raw) == dob_check
+        expiry_valid = mrz_check_digit(expiry_raw) == expiry_check
+
+        def yymmdd_to_iso(raw, birth=False):
+            if not raw or len(raw) != 6 or not raw.isdigit():
+                return ""
+            yy = int(raw[:2])
+            mm = raw[2:4]
+            dd = raw[4:6]
+            if birth:
+                year = 1900 + yy if yy >= 30 else 2000 + yy
+            else:
+                year = 2000 + yy if yy < 70 else 1900 + yy
+            return f"{year:04d}-{mm}-{dd}"
+
+        result = {
+            "type": "P",
+            "country_code": issuing_country,
+            "nationality_code": nationality,
+            "passport_number": passport_number,
+            "surname": name_parts.get("surname", ""),
+            "given_name": name_parts.get("given_name", ""),
+            "full_name": name_parts.get("full_name", ""),
+            "date_of_birth": yymmdd_to_iso(dob_raw, birth=True),
+            "date_of_issue": "",
+            "date_of_expiry": yymmdd_to_iso(expiry_raw, birth=False),
+            "gender": gender_char if gender_char in ["M", "F", "X"] else "",
+            "sex": gender_char if gender_char in ["M", "F", "X"] else "",
+            "passport_valid": passport_valid,
+            "dob_valid": dob_valid,
+            "expiry_valid": expiry_valid,
+            "mrz_text": f"{line1}\n{line2}",
+        }
+
+        result["nationality"] = country_code_to_name(nationality or issuing_country)
+        return result
+    except Exception:
+        return None
+
+
+def parse_mrz_rescue(text):
+    mrz_lines = rescue_mrz_lines(text)
+    if len(mrz_lines) < 2:
+        return None
+
+    best_pair = None
+    best_score = -1
+
+    for i in range(len(mrz_lines) - 1):
+        l1 = mrz_lines[i]
+        l2 = mrz_lines[i + 1]
+
+        score = 0
+        if l1.startswith("P<"):
+            score += 2
+        if len(l1) >= 35:
+            score += 1
+        if len(l2) >= 35:
+            score += 1
+        if "<" in l1 and "<" in l2:
+            score += 1
+
+        if score > best_score:
+            best_score = score
+            best_pair = (l1, l2)
+
+    if not best_pair:
+        return None
+
+    return parse_two_line_passport_mrz(best_pair[0], best_pair[1], rescue_mode=True)
+
+
+def rotate_image_keep_bounds(image, angle):
+    h, w = image.shape[:2]
+    center = (w / 2, h / 2)
+
+    matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+
+    cos = abs(matrix[0, 0])
+    sin = abs(matrix[0, 1])
+
+    new_w = int((h * sin) + (w * cos))
+    new_h = int((h * cos) + (w * sin))
+
+    matrix[0, 2] += (new_w / 2) - center[0]
+    matrix[1, 2] += (new_h / 2) - center[1]
+
+    return cv2.warpAffine(
+        image,
+        matrix,
+        (new_w, new_h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+
+
+def paddleocr_lines_from_image(image):
+    lines = []
+    with PADDLE_OCR_LOCK:
+        result = PADDLE_OCR.predict(image)
+
+    if not result:
+        return lines
+
+    try:
+        for item in result:
+            rec_texts = item.get("rec_text", []) if isinstance(item, dict) else []
+            rec_scores = item.get("rec_score", []) if isinstance(item, dict) else []
+
+            for idx, text in enumerate(rec_texts):
+                score = 0.0
+                if idx < len(rec_scores):
+                    try:
+                        score = float(rec_scores[idx])
+                    except Exception:
+                        score = 0.0
+
+                if str(text).strip():
+                    lines.append({
+                        "text": str(text).strip(),
+                        "score": score,
+                    })
+    except Exception:
+        try:
+            if isinstance(result, list):
+                for item in result:
+                    if isinstance(item, str) and item.strip():
+                        lines.append({"text": item.strip(), "score": 0.5})
+        except Exception:
+            pass
+
+    return lines
+
+
+def choose_best_orientation_by_ocr(image):
+    best_angle = 0
+    best_score = -1
+    best_lines = []
+
+    for angle in [0, 90, 180, 270]:
+        rotated = rotate_image_keep_bounds(image, angle) if angle else image.copy()
+        lines = paddleocr_lines_from_image(rotated)
+
+        score = 0
+        for line in lines:
+            text = line.get("text", "")
+            confidence = float(line.get("score", 0))
+            score += confidence
+            if "P<" in text.upper():
+                score += 5
+            if "<" in text:
+                score += 2
+            if len(text) >= 25:
+                score += 1
+
+        if score > best_score:
+            best_score = score
+            best_angle = angle
+            best_lines = lines
+
+    return best_angle, best_lines
+
+
+def extract_mrz_data(text):
+    text = fix_common_ocr_errors(text, mode="mrz")
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+
+    normalized = []
+    for line in lines:
+        clean_line = re.sub(r"[^A-Z0-9<]", "", line.upper())
+        if len(clean_line) >= 25:
+            normalized.append(clean_line)
+
+    for i in range(len(normalized) - 1):
+        parsed = parse_two_line_passport_mrz(normalized[i], normalized[i + 1])
+        if parsed:
+            return parsed
+
+    rescue = parse_mrz_rescue(text)
+    if rescue:
+        return rescue
+
+    return None
+
+
+def crop_mrz_region(image):
+    h, w = image.shape[:2]
+    return image[int(h * 0.72):h, 0:w]
+
+
+def get_mrz_variants(image):
+    mrz = crop_mrz_region(image)
+    unique = uuid.uuid4().hex
+
+    variants = []
+    variants.append((f"mrz_raw_{unique}.jpg", mrz))
+
+    gray = cv2.cvtColor(mrz, cv2.COLOR_BGR2GRAY) if len(mrz.shape) == 3 else mrz
+    variants.append((f"mrz_gray_{unique}.jpg", gray))
+
+    big = cv2.resize(gray, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
+    variants.append((f"mrz_big_{unique}.jpg", big))
+
+    _, thresh = cv2.threshold(big, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    variants.append((f"mrz_thresh_{unique}.jpg", thresh))
+
+    inv = cv2.bitwise_not(thresh)
+    variants.append((f"mrz_inv_{unique}.jpg", inv))
+
+    return variants
+
+
+def process_passport_ocr(original_path, processed_path):
+    image = cv2.imread(original_path)
+    if image is None:
+        return {
+            "status": "pending verification",
+            "raw_text": "",
+            "image_quality_note": "Unable to read image",
+            "confidence_score": 0,
+            "detected_rotation_angle": 0,
+        }
+
+    best_angle, best_lines = choose_best_orientation_by_ocr(image)
+    rotated = rotate_image_keep_bounds(image, best_angle) if best_angle else image
+
+    cv2.imwrite(processed_path, rotated)
+
+    raw_text = "\n".join([line.get("text", "") for line in best_lines if line.get("text", "").strip()]).strip()
+
+    extracted = extract_mrz_data(raw_text) or {}
+
+    if not extracted:
+        try:
+            extra_text = pytesseract.image_to_string(Image.open(processed_path))
+            merged_text = "\n".join(x for x in [raw_text, extra_text] if x.strip()).strip()
+            raw_text = merged_text
+            extracted = extract_mrz_data(merged_text) or {}
+        except Exception:
+            pass
+
+    if not extracted:
+        extracted = {
+            "type": "P",
+            "country_code": "",
+            "passport_number": "",
+            "surname": "",
+            "given_name": "",
+            "full_name": "",
+            "date_of_birth": "",
+            "date_of_issue": "",
+            "date_of_expiry": "",
+            "nationality": "",
+            "gender": "",
+            "sex": "",
+        }
+
+    extracted["raw_text"] = raw_text
+    extracted["image_quality_note"] = ""
+    extracted["confidence_score"] = 0
+    extracted["detected_rotation_angle"] = best_angle
+    extracted["status"] = "auto-extracted" if extracted.get("passport_number") else "pending verification"
+
+    if extracted.get("nationality_code") and not extracted.get("nationality"):
+        extracted["nationality"] = country_code_to_name(extracted.get("nationality_code"))
+
+    if extracted.get("country_code") and not extracted.get("nationality"):
+        extracted["nationality"] = country_code_to_name(extracted.get("country_code"))
+
+    return extracted
+
+
+def build_universal_passport_fields(extracted):
+    name_parts = resolve_passport_name_parts(extracted)
+    raw_text = get_safe_raw_text(extracted)
+
+    country_code = (
+        extracted.get("country_code")
+        or extracted.get("nationality_code")
+        or ""
+    ).strip().upper()
+
+    nationality = (
+        extracted.get("nationality")
+        or country_code_to_name(country_code)
+        or ""
+    ).strip()
+
+    passport_number = fix_common_ocr_errors(
+        extracted.get("passport_number", ""),
+        mode="passport",
+    )
+
+    return {
+        "type": (extracted.get("type") or "P").strip(),
+        "country_code": country_code,
+        "passport_number": passport_number,
+        "nationality": nationality,
+        "first_name": name_parts.get("first_name", "").strip(),
+        "last_name": name_parts.get("last_name", "").strip(),
+        "full_name": name_parts.get("full_name", "").strip(),
+        "date_of_birth": extracted.get("date_of_birth", "").strip(),
+        "sex": (extracted.get("sex") or extracted.get("gender") or "").strip(),
+        "date_of_issue": extracted.get("date_of_issue", "").strip(),
+        "date_of_expiry": (
+            extracted.get("date_of_expiry")
+            or extracted.get("expiry_date")
+            or ""
+        ).strip(),
+        "custom_fields": extracted.get("custom_fields", []),
+        "raw_text": raw_text,
+        "status": (extracted.get("status") or "pending verification").strip(),
+        "confidence_score": extracted.get("confidence_score", 0),
+        "image_quality_note": extracted.get("image_quality_note", ""),
+        "detected_rotation_angle": extracted.get("detected_rotation_angle", 0),
     }
-
-    # fallback: if no split names but have full name, put full name into first_name
-    if not result["first_name"] and not result["last_name"] and result["full_name"]:
-        result["first_name"] = result["full_name"]
-
-    return result
 
 
 @csrf_exempt
@@ -354,53 +746,72 @@ def extract_passport(request):
         return JsonResponse({"error": "Invalid request method"}, status=400)
 
     if "image" not in request.FILES:
-        return JsonResponse({"error": "Please upload passport image"}, status=400)
+        return JsonResponse({"error": "Please choose a passport image first"}, status=400)
 
-    uploaded_file = request.FILES["image"]
+    try:
+        ensure_media_dirs()
 
-    original_filename, original_path = save_uploaded_image(uploaded_file)
-    processed_filename, processed_path = preprocess_image(original_path)
+        image = request.FILES["image"]
+        ext = os.path.splitext(image.name)[1].lower() or ".jpg"
+        unique_id = uuid.uuid4().hex
 
-    ocr_source = processed_path if processed_path else original_path
-    raw_text = run_basic_ocr(ocr_source)
-    fields = merge_extraction(raw_text)
+        original_filename = f"passport_{unique_id}{ext}"
+        processed_filename = f"processed_{unique_id}.jpg"
 
-    status = "auto-extracted"
-    if not fields.get("passport_number"):
-        status = "pending verification"
+        original_path = os.path.join(settings.MEDIA_ROOT, "passport_images", original_filename)
+        processed_path = os.path.join(settings.MEDIA_ROOT, "passport_processed", processed_filename)
 
-    original_image_url = request.build_absolute_uri(
-        f"/media/passport_images/{original_filename}"
-    )
-    processed_image_url = (
-        request.build_absolute_uri(f"/media/passport_processed/{processed_filename}")
-        if processed_filename
-        else ""
-    )
+        with open(original_path, "wb+") as file_obj:
+            for chunk in image.chunks():
+                file_obj.write(chunk)
 
-    return JsonResponse({
-        "message": "Passport scanned successfully",
-        "status": status,
-        "type": fields.get("type", "P"),
-        "country_code": fields.get("country_code", ""),
-        "passport_number": fields.get("passport_number", ""),
-        "nationality": fields.get("nationality", ""),
-        "first_name": fields.get("first_name", ""),
-        "last_name": fields.get("last_name", ""),
-        "full_name": fields.get("full_name", ""),
-        "date_of_birth": fields.get("date_of_birth", ""),
-        "sex": fields.get("sex", ""),
-        "date_of_issue": fields.get("date_of_issue", ""),
-        "date_of_expiry": fields.get("date_of_expiry", ""),
-        "country": fields.get("nationality", ""),
-        "expiry_date": fields.get("date_of_expiry", ""),
-        "gender": fields.get("gender", fields.get("sex", "")),
-        "raw_text": raw_text,
-        "image_quality_note": "",
-        "confidence_score": 0,
-        "original_image_name": original_filename,
-        "processed_image_name": processed_filename or "",
-        "original_image_url": original_image_url,
-        "processed_image_url": processed_image_url,
-        "dynamic_fields": [],
-    })
+        extracted = process_passport_ocr(original_path, processed_path)
+        ui_result = build_universal_passport_fields(extracted)
+
+        if not ui_result.get("first_name") and extracted.get("given_name"):
+            ui_result["first_name"] = extracted.get("given_name", "")
+
+        if not ui_result.get("last_name") and extracted.get("surname"):
+            ui_result["last_name"] = extracted.get("surname", "")
+
+        if not ui_result.get("sex") and extracted.get("gender"):
+            ui_result["sex"] = extracted.get("gender", "")
+
+        final_status = ui_result.get("status", "pending verification")
+        if not ui_result.get("passport_number"):
+            final_status = "pending verification"
+
+        return JsonResponse({
+            "message": "Passport scanned successfully",
+            "type": ui_result.get("type", "P"),
+            "country_code": ui_result.get("country_code", ""),
+            "passport_number": ui_result.get("passport_number", ""),
+            "nationality": ui_result.get("nationality", ""),
+            "first_name": ui_result.get("first_name", ""),
+            "last_name": ui_result.get("last_name", ""),
+            "full_name": ui_result.get("full_name", ""),
+            "date_of_birth": normalize_display_date(ui_result.get("date_of_birth", "")),
+            "sex": ui_result.get("sex", ""),
+            "date_of_issue": normalize_display_date(ui_result.get("date_of_issue", "")),
+            "date_of_expiry": normalize_display_date(ui_result.get("date_of_expiry", "")),
+            "custom_fields": ui_result.get("custom_fields", []),
+            "raw_text": ui_result.get("raw_text", ""),
+            "status": final_status,
+            "confidence_score": ui_result.get("confidence_score", 0),
+            "image_quality_note": ui_result.get("image_quality_note", ""),
+            "detected_rotation_angle": ui_result.get("detected_rotation_angle", 0),
+            "original_image_name": original_filename,
+            "processed_image_name": processed_filename,
+            "original_image_url": request.build_absolute_uri(
+                f"{settings.MEDIA_URL}passport_images/{original_filename}"
+            ),
+            "processed_image_url": request.build_absolute_uri(
+                f"{settings.MEDIA_URL}passport_processed/{processed_filename}"
+            ),
+        })
+
+    except Exception as e:
+        return JsonResponse({
+            "error": str(e),
+            "status": "pending verification",
+        }, status=500)
