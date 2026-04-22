@@ -519,7 +519,7 @@ def paddleocr_lines_from_image(image):
     lines = []
 
     with PADDLE_OCR_LOCK:
-        result = PADDLE_OCR.predict(image)
+        result = PADDLE_OCR.ocr(image, cls=False)
 
     if not result:
         return lines
