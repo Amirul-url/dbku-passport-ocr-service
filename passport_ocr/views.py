@@ -525,32 +525,32 @@ def paddleocr_lines_from_image(image):
         return lines
 
     try:
-        # FORMAT BARU (dict)
         for item in result:
+
+            # FORMAT BARU (dict)
             if isinstance(item, dict):
                 texts = item.get("rec_text", [])
                 scores = item.get("rec_score", [])
 
-                for i, text in enumerate(texts):
-                    score = 0.0
-                    if i < len(scores):
-                        try:
-                            score = float(scores[i])
-                        except:
-                            pass
+                for i in range(len(texts)):
+                    text = texts[i]
+                    score = scores[i] if i < len(scores) else 0
 
                     if str(text).strip():
                         lines.append({
                             "text": str(text).strip(),
-                            "score": score
+                            "score": float(score)
                         })
 
             # FORMAT LAMA (list)
             elif isinstance(item, list):
                 for sub in item:
                     if isinstance(sub, list) and len(sub) >= 2:
-                        text = sub[1][0] if isinstance(sub[1], list) else ""
-                        score = sub[1][1] if isinstance(sub[1], list) else 0
+                        if isinstance(sub[1], list):
+                            text = sub[1][0]
+                            score = sub[1][1] if len(sub[1]) > 1 else 0
+                        else:
+                            continue
 
                         if str(text).strip():
                             lines.append({
