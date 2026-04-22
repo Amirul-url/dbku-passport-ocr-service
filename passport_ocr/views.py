@@ -517,6 +517,7 @@ def rotate_image_keep_bounds(image, angle):
 
 def paddleocr_lines_from_image(image):
     lines = []
+
     with PADDLE_OCR_LOCK:
         result = PADDLE_OCR.predict(image)
 
@@ -524,31 +525,41 @@ def paddleocr_lines_from_image(image):
         return lines
 
     try:
+        # FORMAT BARU (dict)
         for item in result:
-            rec_texts = item.get("rec_text", []) if isinstance(item, dict) else []
-            rec_scores = item.get("rec_score", []) if isinstance(item, dict) else []
+            if isinstance(item, dict):
+                texts = item.get("rec_text", [])
+                scores = item.get("rec_score", [])
 
-            for idx, text in enumerate(rec_texts):
-                score = 0.0
-                if idx < len(rec_scores):
-                    try:
-                        score = float(rec_scores[idx])
-                    except Exception:
-                        score = 0.0
+                for i, text in enumerate(texts):
+                    score = 0.0
+                    if i < len(scores):
+                        try:
+                            score = float(scores[i])
+                        except:
+                            pass
 
-                if str(text).strip():
-                    lines.append({
-                        "text": str(text).strip(),
-                        "score": score,
-                    })
+                    if str(text).strip():
+                        lines.append({
+                            "text": str(text).strip(),
+                            "score": score
+                        })
+
+            # FORMAT LAMA (list)
+            elif isinstance(item, list):
+                for sub in item:
+                    if isinstance(sub, list) and len(sub) >= 2:
+                        text = sub[1][0] if isinstance(sub[1], list) else ""
+                        score = sub[1][1] if isinstance(sub[1], list) else 0
+
+                        if str(text).strip():
+                            lines.append({
+                                "text": str(text).strip(),
+                                "score": float(score)
+                            })
+
     except Exception:
-        try:
-            if isinstance(result, list):
-                for item in result:
-                    if isinstance(item, str) and item.strip():
-                        lines.append({"text": item.strip(), "score": 0.5})
-        except Exception:
-            pass
+        pass
 
     return lines
 
