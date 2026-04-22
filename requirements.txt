@@ -3,7 +3,7 @@ gunicorn
 opencv-python-headless
 pytesseract
 paddleocr
-paddlepaddle
+paddlepaddle==3.2.2
 numpy
 Pillow
 django-cors-headers
