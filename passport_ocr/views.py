@@ -20,12 +20,7 @@ if os.name == "nt":
     pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 
-PADDLE_OCR = PaddleOCR(
-    use_doc_orientation_classify=False,
-    use_doc_unwarping=False,
-    use_textline_orientation=False,
-    lang="en",
-)
+PADDLE_OCR = PaddleOCR(lang="en")
 PADDLE_OCR_LOCK = threading.Lock()
 
 
@@ -876,66 +871,114 @@ def extract_passport(request):
         return JsonResponse({"error": "Unauthorized"}, status=401)
 
     if request.method != "POST":
-        return JsonResponse({"error": "Invalid request method"}, status=400)
+        return JsonResponse({"error": "Invalid request"}, status=400)
 
     if "image" not in request.FILES:
-        return JsonResponse({"error": "Please choose a passport image first"}, status=400)
+        return JsonResponse({"error": "No image"}, status=400)
 
     try:
-        ensure_media_dirs()
+        ensure_dirs()
 
         image = request.FILES["image"]
-        ext = os.path.splitext(image.name)[1].lower() or ".jpg"
-        unique_id = uuid.uuid4().hex
+        ext = ".jpg"
+        uid = uuid.uuid4().hex
 
-        original_filename = f"passport_{unique_id}{ext}"
-        processed_filename = f"processed_{unique_id}.jpg"
+        filename = f"passport_{uid}{ext}"
+        path = os.path.join(settings.MEDIA_ROOT, "passport_images", filename)
 
-        original_path = os.path.join(settings.MEDIA_ROOT, "passport_images", original_filename)
-        processed_path = os.path.join(settings.MEDIA_ROOT, "passport_processed", processed_filename)
-
-        with open(original_path, "wb+") as file_obj:
+        with open(path, "wb+") as f:
             for chunk in image.chunks():
-                file_obj.write(chunk)
+                f.write(chunk)
 
-        extracted = process_passport_ocr(original_path, processed_path)
-        ui_result = build_universal_passport_fields(extracted)
-
-        final_status = ui_result.get("status", "pending verification")
-        if not ui_result.get("passport_number"):
-            final_status = "pending verification"
+        text = extract_text(path)
+        parsed = simple_parse(text)
 
         return JsonResponse({
             "message": "Passport scanned successfully",
-            "type": ui_result.get("type", "P"),
-            "country_code": ui_result.get("country_code", ""),
-            "passport_number": ui_result.get("passport_number", ""),
-            "nationality": ui_result.get("nationality", ""),
-            "first_name": ui_result.get("first_name", ""),
-            "last_name": ui_result.get("last_name", ""),
-            "full_name": ui_result.get("full_name", ""),
-            "date_of_birth": normalize_display_date(ui_result.get("date_of_birth", "")),
-            "sex": ui_result.get("sex", ""),
-            "date_of_issue": normalize_display_date(ui_result.get("date_of_issue", "")),
-            "date_of_expiry": normalize_display_date(ui_result.get("date_of_expiry", "")),
-            "custom_fields": ui_result.get("custom_fields", []),
-            "raw_text": ui_result.get("raw_text", ""),
-            "status": final_status,
-            "confidence_score": ui_result.get("confidence_score", 0),
-            "image_quality_note": ui_result.get("image_quality_note", ""),
-            "detected_rotation_angle": ui_result.get("detected_rotation_angle", 0),
-            "original_image_name": original_filename,
-            "processed_image_name": processed_filename,
+            **parsed,
+            "raw_text": text,
+            "status": "auto-extracted" if parsed["passport_number"] else "pending verification",
             "original_image_url": request.build_absolute_uri(
-                f"{settings.MEDIA_URL}passport_images/{original_filename}"
-            ),
-            "processed_image_url": request.build_absolute_uri(
-                f"{settings.MEDIA_URL}passport_processed/{processed_filename}"
+                f"{settings.MEDIA_URL}passport_images/{filename}"
             ),
         })
 
     except Exception as e:
         return JsonResponse({
-            "error": str(e),
-            "status": "pending verification",
+            "error": str(e)
         }, status=500)
+        
+def ensure_dirs():
+    os.makedirs(os.path.join(settings.MEDIA_ROOT, "passport_images"), exist_ok=True)
+
+def ocr_lines(image):
+    results = PADDLE_OCR.ocr(image, cls=False)
+    lines = []
+
+    if not results:
+        return lines
+
+    for res in results:
+        for line in res:
+            try:
+                text = line[1][0]
+                score = line[1][1]
+                if text.strip():
+                    lines.append(text.strip())
+            except:
+                continue
+
+    return lines
+
+def extract_text(image_path):
+    img = cv2.imread(image_path)
+
+    if img is None:
+        return ""
+
+    lines = ocr_lines(img)
+
+    # fallback tesseract
+    if not lines:
+        try:
+            pil = Image.open(image_path)
+            return pytesseract.image_to_string(pil)
+        except:
+            return ""
+
+    return "\n".join(lines)
+    
+def simple_parse(text):
+    result = {
+        "type": "P",
+        "country_code": "",
+        "passport_number": "",
+        "nationality": "",
+        "first_name": "",
+        "last_name": "",
+        "date_of_birth": "",
+        "sex": "",
+        "date_of_issue": "",
+        "date_of_expiry": "",
+    }
+
+    upper = text.upper()
+
+    # passport number
+    match = re.search(r"[A-Z]\d{7,8}", upper)
+    if match:
+        result["passport_number"] = match.group(0)
+
+    # country
+    if "MYS" in upper:
+        result["country_code"] = "MYS"
+        result["nationality"] = "Malaysia"
+
+    # gender
+    if "F" in upper:
+        result["sex"] = "F"
+    elif "M" in upper:
+        result["sex"] = "M"
+
+    return result
+

@@ -17,10 +17,10 @@ urlpatterns = [
     path("api/ocr/", include("passport_ocr.urls")),
 ]
 
-# Serve media
+# serve media
 urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
 
-# Production fallback
+# production fallback
 if not settings.DEBUG:
     urlpatterns += [
         re_path(r'^media/(?P<path>.*)$', serve, {'document_root': settings.MEDIA_ROOT}),
